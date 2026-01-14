@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-const COLLECTION_ID = "c72f4253-0add-4dd7-8bdc-7831ff163ba1";
+const COLLECTION_ID = "b20b98cf-52cc-4a01-b412-f8bca96b809d";
 
 export async function POST(req) {
   try {
