@@ -7,6 +7,7 @@ const COLLECTION_ID = "b20b98cf-52cc-4a01-b412-f8bca96b809d";
 export async function POST(req) {
   try {
     const cookie = req.headers.get("cookie");
+    console.log("Cookie:", cookie ? "exists" : "missing");
     if (!cookie) {
       return NextResponse.json(
         { error: "No session cookie" },
