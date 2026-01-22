@@ -20,7 +20,6 @@ export async function POST(req) {
     console.log("=== BITSTREAM UPLOAD DEBUG ===");
     console.log("File:", file?.name, file?.size, file?.type);
     console.log("ItemId:", itemId);
-    console.log("FormData entries:", Array.from(formData.entries()).map(([k, v]) => [k, v instanceof File ? `File: ${v.name}` : v]));
 
     if (!file || !itemId) {
       return NextResponse.json(
@@ -46,6 +45,9 @@ export async function POST(req) {
     const blob = new Blob([buffer], { type: file.type });
     dspaceFormData.append("file", blob, file.name);
 
+    console.log("Uploading to DSpace...");
+    console.log("URL:", `https://lib.hpu.edu.vn/rest/items/${itemId}/bitstreams`);
+
     const res = await fetch(
       `https://lib.hpu.edu.vn/rest/items/${itemId}/bitstreams`,
       {
@@ -58,7 +60,9 @@ export async function POST(req) {
       }
     );
 
+    console.log("DSpace response status:", res.status);
     const text = await res.text();
+    console.log("DSpace response:", text.substring(0, 500));
 
     if (!res.ok) {
       return NextResponse.json(
@@ -78,8 +82,10 @@ export async function POST(req) {
     });
 
   } catch (err) {
+    console.error("=== BITSTREAM ERROR ===");
+    console.error(err);
     return NextResponse.json(
-      { error: "Internal error", message: err.message },
+      { error: "Internal error", message: err.message, stack: err.stack },
       { status: 500 }
     );
   }

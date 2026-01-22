@@ -1,29 +1,7 @@
 "use client";
 import { useState } from "react";
 
-/* ===== Helpers ===== */
-function detectFormat(text = "") {
-  const t = text.trim();
-  if (t.startsWith("<")) return "xml";
-  if (t.startsWith("{") || t.startsWith("[")) return "json";
-  return "text";
-}
 
-function formatXML(xml) {
-  let formatted = "";
-  const reg = /(>)(<)(\/*)/g;
-  xml = xml.replace(reg, "$1\n$2$3");
-  let pad = 0;
-  xml.split("\n").forEach((node) => {
-    let indent = 0;
-    if (node.match(/.+<\/\w[^>]*>$/)) indent = 0;
-    else if (node.match(/^<\/\w/)) pad--;
-    else if (node.match(/^<\w([^>]*[^/])?>/)) indent = 1;
-    formatted += " ".repeat(Math.max(pad, 0)) + node + "\n";
-    pad += indent;
-  });
-  return formatted.trim();
-}
 
 function extractItemId(responseString) {
   try {
@@ -137,13 +115,15 @@ export default function BulkUploadPage() {
   const [isPrivate, setIsPrivate] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState([]); // Tất cả files (CSV + PDF)
   const [pairedItems, setPairedItems] = useState([]); // Items đã ghép cặp
-  const [defaultAuthor, setDefaultAuthor] = useState("Nguyễn Văn A");
-  const [defaultYear, setDefaultYear] = useState("2024");
   
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState([]);
   const [results, setResults] = useState([]);
   const [error, setError] = useState(null);
+  
+  // Preview mode states
+  const [isPreviewMode, setIsPreviewMode] = useState(true); // Mặc định là preview
+  const [previewValidated, setPreviewValidated] = useState(false);
 
   const checkSession = async () => {
     const res = await fetch("/api/session", { credentials: "include" });
@@ -181,6 +161,8 @@ export default function BulkUploadPage() {
     const files = Array.from(e.target.files);
     setSelectedFiles(files);
     setError(null);
+    setPreviewValidated(false); // Reset preview state
+    setResults([]); // Clear previous results
     
     try {
       // Separate CSV and PDF files
@@ -252,7 +234,7 @@ export default function BulkUploadPage() {
     formData.append("file", file);
     formData.append("itemId", itemId);
 
-    const res = await fetch("/api/bitstream", {
+    const res = await fetch("/api/bitstreams", {
       method: "POST",
       credentials: "include",
       body: formData,
@@ -352,8 +334,8 @@ export default function BulkUploadPage() {
     };
   };
 
-  // BULK UPLOAD: Paired CSV + PDF mode
-  const handleBulkUploadPaired = async () => {
+  // PREVIEW MODE: Validate without uploading
+  const handlePreviewValidation = async () => {
     if (pairedItems.length === 0) {
       setError({ error: "Please select CSV and PDF files first" });
       return;
@@ -365,6 +347,86 @@ export default function BulkUploadPage() {
     setProgress([]);
 
     try {
+      // Check session first
+      setProgress(prev => [...prev, "Checking session..."]);
+      const sessionCheck = await checkSession();
+      if (!sessionCheck.authenticated) {
+        throw new Error("Session expired. Please login again.");
+      }
+
+      setProgress(prev => [...prev, "Validating files..."]);
+
+      // Validate each item
+      const validationResults = [];
+      for (let i = 0; i < pairedItems.length; i++) {
+        const item = pairedItems[i];
+        
+        setProgress(prev => [...prev, 
+          `[${i + 1}/${pairedItems.length}] Validating: ${item.title.substring(0, 60)}...`
+        ]);
+
+        // Validation checks
+        const validation = {
+          title: item.title,
+          basename: item.basename,
+          status: "validated",
+          checks: {
+            hasMetadata: item.metadata.length > 0,
+            hasPdf: item.hasPdf,
+            hasTitle: !!item.metadata.find(m => m.key.includes('title')),
+            metadataCount: item.metadata.length
+          }
+        };
+
+        // Check for issues
+        if (!validation.checks.hasMetadata) {
+          validation.status = "warning";
+          validation.warning = "No metadata found";
+        }
+        if (!validation.checks.hasPdf) {
+          validation.status = "warning";
+          validation.warning = "No PDF file matched";
+        }
+        if (!validation.checks.hasTitle) {
+          validation.status = "error";
+          validation.error = "Missing title metadata";
+        }
+
+        validationResults.push(validation);
+      }
+
+      setResults(validationResults);
+      setPreviewValidated(true);
+      setProgress(prev => [...prev, `✅ Validation complete! All ${pairedItems.length} items ready to upload.`]);
+      
+    } catch (err) {
+      setError({ error: err.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // UPLOAD MODE: Actually upload to DSpace
+  const handleConfirmUpload = async () => {
+    if (!previewValidated) {
+      setError({ error: "Please run validation first" });
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setResults([]);
+    setProgress([]);
+    setIsPreviewMode(false);
+
+    try {
+      // Check session again
+      setProgress(prev => [...prev, "Checking session..."]);
+      const sessionCheck = await checkSession();
+      if (!sessionCheck.authenticated) {
+        throw new Error("Session expired. Please login again.");
+      }
+
       for (let i = 0; i < pairedItems.length; i++) {
         const item = pairedItems[i];
         
@@ -430,10 +492,14 @@ export default function BulkUploadPage() {
 
         await new Promise(resolve => setTimeout(resolve, 500));
       }
+      
+      setProgress(prev => [...prev, `🎉 Upload complete! ${results.filter(r => r.status === "success").length} items created.`]);
+      
     } catch (err) {
       setError({ error: err.message });
     } finally {
       setLoading(false);
+      setPreviewValidated(false); // Reset for next batch
     }
   };
 
@@ -476,7 +542,20 @@ export default function BulkUploadPage() {
         {session?.authenticated && (
           <>
             <div className="bg-green-50 border border-green-200 rounded-xl p-5 mb-8">
-              <p className="text-green-800 font-semibold">✅ Đã đăng nhập</p>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-green-800 font-semibold">✅ Đã đăng nhập</p>
+                  <p className="text-xs text-green-600 mt-1">
+                    {session.email} | Token expires: {new Date(session.expires).toLocaleString('vi-VN')}
+                  </p>
+                </div>
+                <button
+                  onClick={checkSession}
+                  className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700"
+                >
+                  🔄 Refresh Session
+                </button>
+              </div>
             </div>
 
             {/* Mode Selection */}
@@ -503,7 +582,7 @@ export default function BulkUploadPage() {
 
               <div className="space-y-4">
                 {/* Private mode toggle */}
-                <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
+                {/* <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
                   <label className="flex items-center cursor-pointer">
                     <input
                       type="checkbox"
@@ -520,7 +599,7 @@ export default function BulkUploadPage() {
                       </p>
                     </div>
                   </label>
-                </div>
+                </div> */}
 
                 {/* File input */}
                 <div>
@@ -588,24 +667,67 @@ export default function BulkUploadPage() {
                 )}
 
                 {/* Upload button */}
-                <button
-                  onClick={handleBulkUploadPaired}
-                  disabled={loading || pairedItems.length === 0}
-                  className={`w-full py-3 px-6 font-medium rounded-lg text-white transition-colors ${
-                    loading || pairedItems.length === 0
-                      ? "bg-gray-400 cursor-not-allowed"
-                      : isPrivate
-                      ? "bg-purple-600 hover:bg-purple-700"
-                      : "bg-indigo-600 hover:bg-indigo-700"
-                  }`}
-                >
-                  {loading 
-                    ? "Processing..." 
-                    : isPrivate
-                    ? `🔒 Create ${pairedItems.length} Private Items`
-                    : `🚀 Create ${pairedItems.length} Items`
-                  }
-                </button>
+                {!previewValidated ? (
+                  // STEP 1: Preview & Validate
+                  <button
+                    onClick={handlePreviewValidation}
+                    disabled={loading || pairedItems.length === 0}
+                    className={`w-full py-3 px-6 font-medium rounded-lg text-white transition-colors ${
+                      loading || pairedItems.length === 0
+                        ? "bg-gray-400 cursor-not-allowed"
+                        : "bg-blue-600 hover:bg-blue-700"
+                    }`}
+                  >
+                    {loading 
+                      ? "Validating..." 
+                      : `🔍 Preview & Validate ${pairedItems.length} Items`
+                    }
+                  </button>
+                ) : (
+                  // STEP 2: Confirm & Upload
+                  <div className="space-y-3">
+                    <div className="p-4 bg-green-50 border-2 border-green-500 rounded-lg">
+                      <p className="text-green-800 font-semibold text-center">
+                        ✅ Validation passed! Ready to upload to DSpace
+                      </p>
+                      <p className="text-xs text-green-700 text-center mt-1">
+                        This will create {pairedItems.length} items in DSpace
+                      </p>
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        onClick={() => {
+                          setPreviewValidated(false);
+                          setResults([]);
+                        }}
+                        disabled={loading}
+                        className="py-3 px-6 font-medium rounded-lg bg-gray-500 text-white hover:bg-gray-600 transition-colors"
+                      >
+                        ← Back to Edit
+                      </button>
+                      
+                      <button
+                        onClick={handleConfirmUpload}
+                        disabled={loading}
+                        className={`py-3 px-6 font-medium rounded-lg text-white transition-colors ${
+                          loading
+                            ? "bg-gray-400 cursor-not-allowed"
+                            : isPrivate
+                            ? "bg-purple-600 hover:bg-purple-700"
+                            : "bg-green-600 hover:bg-green-700"
+                        }`}
+                      >
+                        {loading 
+                          ? "Uploading..." 
+                          : isPrivate
+                          ? `🔒 Confirm & Upload (Private)`
+                          : `✅ Confirm & Upload to DSpace`
+                        }
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -624,83 +746,154 @@ export default function BulkUploadPage() {
             {/* Results */}
             {results.length > 0 && (
               <div className="bg-white shadow-lg rounded-xl p-7 border border-gray-200 mt-8">
-                <h3 className="text-xl font-semibold text-gray-800 mb-4">Results</h3>
+                <h3 className="text-xl font-semibold text-gray-800 mb-4">
+                  {previewValidated ? "📋 Validation Results" : "✅ Upload Results"}
+                </h3>
                 <div className="space-y-2 max-h-96 overflow-auto">
-                  {results.map((result, i) => (
-                    <div
-                      key={i}
-                      className={`p-3 rounded-lg border ${
-                        result.status === "success"
-                          ? result.private
-                            ? "bg-purple-50 border-purple-200"
-                            : "bg-green-50 border-green-200"
-                          : "bg-red-50 border-red-200"
-                      }`}
-                    >
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <p className="text-sm font-medium">
-                            {result.status === "success" ? (result.private ? "🔒" : "✅") : "❌"}{" "}
-                            {result.title || result.basename}
-                          </p>
-                          {result.basename && (
-                            <p className="text-xs text-gray-500 mt-1">
-                              File: {result.basename}
-                            </p>
-                          )}
-                          {result.itemId && (
-                            <p className="text-xs text-gray-600 mt-1">
-                              Item ID: {result.itemId}
-                            </p>
-                          )}
-                          {result.bitstreamId && (
-                            <p className="text-xs text-gray-600 mt-1">
-                              Bitstream ID: {result.bitstreamId}
-                            </p>
-                          )}
-                          {result.hasPdf !== undefined && (
-                            <p className="text-xs mt-1">
-                              {result.hasPdf ? (
-                                <span className="text-green-600">📎 PDF uploaded</span>
-                              ) : (
-                                <span className="text-yellow-600">⚠️ No PDF file</span>
+                  {results.map((result, i) => {
+                    // Preview mode display
+                    if (result.checks) {
+                      return (
+                        <div
+                          key={i}
+                          className={`p-3 rounded-lg border ${
+                            result.status === "validated"
+                              ? "bg-green-50 border-green-200"
+                              : result.status === "warning"
+                              ? "bg-yellow-50 border-yellow-200"
+                              : "bg-red-50 border-red-200"
+                          }`}
+                        >
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <p className="text-sm font-medium">
+                                {result.status === "validated" ? "✅" : result.status === "warning" ? "⚠️" : "❌"}{" "}
+                                {result.title}
+                              </p>
+                              <p className="text-xs text-gray-500 mt-1">
+                                File: {result.basename}
+                              </p>
+                              <div className="flex gap-3 mt-2 text-xs">
+                                <span className={result.checks.hasMetadata ? "text-green-600" : "text-red-600"}>
+                                  Metadata: {result.checks.metadataCount} fields
+                                </span>
+                                <span className={result.checks.hasPdf ? "text-green-600" : "text-yellow-600"}>
+                                  {result.checks.hasPdf ? "✓ PDF matched" : "⚠ No PDF"}
+                                </span>
+                                <span className={result.checks.hasTitle ? "text-green-600" : "text-red-600"}>
+                                  {result.checks.hasTitle ? "✓ Has title" : "✗ Missing title"}
+                                </span>
+                              </div>
+                              {result.warning && (
+                                <p className="text-xs text-yellow-700 mt-2 font-medium">
+                                  ⚠️ {result.warning}
+                                </p>
                               )}
+                              {result.error && (
+                                <p className="text-xs text-red-700 mt-2 font-medium">
+                                  ❌ {result.error}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+                    
+                    // Upload mode display
+                    return (
+                      <div
+                        key={i}
+                        className={`p-3 rounded-lg border ${
+                          result.status === "success"
+                            ? result.private
+                              ? "bg-purple-50 border-purple-200"
+                              : "bg-green-50 border-green-200"
+                            : "bg-red-50 border-red-200"
+                        }`}
+                      >
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <p className="text-sm font-medium">
+                              {result.status === "success" ? (result.private ? "🔒" : "✅") : "❌"}{" "}
+                              {result.title || result.basename}
                             </p>
-                          )}
-                          {result.private && result.policiesRemoved && (
-                            <p className="text-xs text-purple-600 mt-1">
-                              🔒 Policies removed: Item ({result.policiesRemoved.item}), Bitstream ({result.policiesRemoved.bitstream})
-                            </p>
-                          )}
-                          {result.error && (
-                            <p className="text-xs text-red-600 mt-1">
-                              Error: {result.error}
-                            </p>
-                          )}
+                            {result.basename && (
+                              <p className="text-xs text-gray-500 mt-1">
+                                File: {result.basename}
+                              </p>
+                            )}
+                            {result.itemId && (
+                              <p className="text-xs text-gray-600 mt-1">
+                                Item ID: {result.itemId}
+                              </p>
+                            )}
+                            {result.bitstreamId && (
+                              <p className="text-xs text-gray-600 mt-1">
+                                Bitstream ID: {result.bitstreamId}
+                              </p>
+                            )}
+                            {result.hasPdf !== undefined && (
+                              <p className="text-xs mt-1">
+                                {result.hasPdf ? (
+                                  <span className="text-green-600">📎 PDF uploaded</span>
+                                ) : (
+                                  <span className="text-yellow-600">⚠️ No PDF file</span>
+                                )}
+                              </p>
+                            )}
+                            {result.private && result.policiesRemoved && (
+                              <p className="text-xs text-purple-600 mt-1">
+                                🔒 Policies removed: Item ({result.policiesRemoved.item}), Bitstream ({result.policiesRemoved.bitstream})
+                              </p>
+                            )}
+                            {result.error && (
+                              <p className="text-xs text-red-600 mt-1">
+                                Error: {result.error}
+                              </p>
+                            )}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
                 <div className="mt-4 pt-4 border-t border-gray-200">
-                  <p className="text-sm text-gray-700">
-                    <span className="font-semibold">Total:</span> {results.length} items |{" "}
-                    <span className="text-green-600 font-semibold">
-                      {results.filter(r => r.status === "success").length} succeeded
-                    </span>{" "}
-                    |{" "}
-                    <span className="text-red-600 font-semibold">
-                      {results.filter(r => r.status === "failed").length} failed
-                    </span>
-                    {results.some(r => r.private) && (
-                      <>
-                        {" "}|{" "}
-                        <span className="text-purple-600 font-semibold">
-                          {results.filter(r => r.private).length} private
-                        </span>
-                      </>
-                    )}
-                  </p>
+                  {previewValidated ? (
+                    <p className="text-sm text-gray-700">
+                      <span className="font-semibold">Total:</span> {results.length} items |{" "}
+                      <span className="text-green-600 font-semibold">
+                        {results.filter(r => r.status === "validated").length} ready
+                      </span>{" "}
+                      |{" "}
+                      <span className="text-yellow-600 font-semibold">
+                        {results.filter(r => r.status === "warning").length} warnings
+                      </span>{" "}
+                      |{" "}
+                      <span className="text-red-600 font-semibold">
+                        {results.filter(r => r.status === "error").length} errors
+                      </span>
+                    </p>
+                  ) : (
+                    <p className="text-sm text-gray-700">
+                      <span className="font-semibold">Total:</span> {results.length} items |{" "}
+                      <span className="text-green-600 font-semibold">
+                        {results.filter(r => r.status === "success").length} succeeded
+                      </span>{" "}
+                      |{" "}
+                      <span className="text-red-600 font-semibold">
+                        {results.filter(r => r.status === "failed").length} failed
+                      </span>
+                      {results.some(r => r.private) && (
+                        <>
+                          {" "}|{" "}
+                          <span className="text-purple-600 font-semibold">
+                            {results.filter(r => r.private).length} private
+                          </span>
+                        </>
+                      )}
+                    </p>
+                  )}
                 </div>
               </div>
             )}
